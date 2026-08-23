@@ -46,6 +46,16 @@ QListWidget::item { padding: 9px; border-bottom: 1px solid #ebe9e3; }
 QListWidget::item:hover { background: #f2efe7; }
 QListWidget::item:selected { color: #233a36; background: #dcebe6; border-bottom-color: #c9ded7; }
 QListWidget[bookList="true"]::item { padding: 11px; }
+QListWidget[bookTiles="true"] { padding: 8px; }
+QListWidget[bookTiles="true"]::item {
+    margin: 5px;
+    padding: 12px;
+    background: #fffefa;
+    border: 1px solid #d8d5cc;
+    border-radius: 12px;
+}
+QListWidget[bookTiles="true"]::item:hover { background: #f4f0e7; border-color: #9caaa5; }
+QListWidget[bookTiles="true"]::item:selected { background: #dcebe6; border-color: #56877d; }
 
 QScrollArea#readerScroll { background: #d9d8d3; border: 0; border-radius: 10px; }
 QWidget#readerCanvas { background: #d9d8d3; }

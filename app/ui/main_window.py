@@ -5,13 +5,13 @@ import sqlite3
 from collections import Counter
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, QSize, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QRectF, QSettings, QSize, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QImage, QPageLayout, QPainter, QPixmap
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QAbstractItemView, QApplication, QButtonGroup, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QScrollArea,
+    QListView, QMainWindow, QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QScrollArea,
     QSpinBox, QSplitter, QStackedWidget, QVBoxLayout, QWidget,
 )
 
@@ -100,6 +100,17 @@ class LibraryPage(QWidget):
         self.storage = QComboBox()
         filters.addWidget(self.storage)
         filters.addStretch()
+        filters.addWidget(QLabel("View:"))
+        self.list_view_button = QPushButton("List")
+        self.list_view_button.setCheckable(True)
+        self.tile_view_button = QPushButton("Large Tiles")
+        self.tile_view_button.setCheckable(True)
+        self.view_buttons = QButtonGroup(self)
+        self.view_buttons.setExclusive(True)
+        self.view_buttons.addButton(self.list_view_button)
+        self.view_buttons.addButton(self.tile_view_button)
+        filters.addWidget(self.list_view_button)
+        filters.addWidget(self.tile_view_button)
         layout.addLayout(filters)
         self.empty = QLabel("No books have been added yet.\n\nPress “+ Add Book” to add the first one.")
         self.empty.setAlignment(Qt.AlignCenter)
@@ -109,6 +120,9 @@ class LibraryPage(QWidget):
         self.books.setSpacing(4)
         self.books.setIconSize(QSize(85, 110))
         self.books.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.books.setMovement(QListView.Static)
+        self.books.setResizeMode(QListView.Adjust)
+        self.books.setWordWrap(True)
         layout.addWidget(self.empty, 1)
         layout.addWidget(self.books, 1)
         self.search.textChanged.connect(self._delayed_refresh)
@@ -121,10 +135,32 @@ class LibraryPage(QWidget):
         )
         add.clicked.connect(self.add_book.emit)
         self.delete.clicked.connect(self._delete_selected)
+        self.list_view_button.clicked.connect(lambda: self._set_view_mode("list"))
+        self.tile_view_button.clicked.connect(lambda: self._set_view_mode("tiles"))
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
         self.timer.setInterval(150)
         self.timer.timeout.connect(self.refresh)
+        saved_view = str(QSettings().value("library/view_mode", "tiles"))
+        self._set_view_mode(saved_view if saved_view in {"list", "tiles"} else "tiles", save=False)
+
+    def _set_view_mode(self, mode: str, save: bool = True) -> None:
+        self.view_mode = mode
+        tiles = mode == "tiles"
+        self.tile_view_button.setChecked(tiles)
+        self.list_view_button.setChecked(not tiles)
+        self.books.setViewMode(QListView.IconMode if tiles else QListView.ListMode)
+        self.books.setFlow(QListView.LeftToRight if tiles else QListView.TopToBottom)
+        self.books.setWrapping(tiles)
+        self.books.setIconSize(QSize(170, 225) if tiles else QSize(85, 110))
+        self.books.setGridSize(QSize(230, 325) if tiles else QSize(-1, -1))
+        self.books.setSpacing(10 if tiles else 4)
+        self.books.setProperty("bookTiles", tiles)
+        self.books.style().unpolish(self.books)
+        self.books.style().polish(self.books)
+        if save:
+            QSettings().setValue("library/view_mode", mode)
+        self.refresh()
 
     def _delayed_refresh(self) -> None:
         self.timer.start()
@@ -159,11 +195,20 @@ class LibraryPage(QWidget):
             text = f"{book.title.upper()}\n{book.book_code}\n{book.location}\n{categories}" + (f"\n{tags}" if tags else "")
             item = QListWidgetItem(text)
             item.setData(Qt.UserRole, book.id)
+            item.setToolTip(
+                f"{book.title}\n{book.book_code}\n{book.location}\n{categories}"
+                + (f"\n{tags}" if tags else "")
+            )
             thumbnail = self.library.thumbnail(book)
             if thumbnail.exists():
-                item.setIcon(QPixmap(str(thumbnail)).scaled(85, 110, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            # A zero-height hint makes valid database rows completely invisible.
-            item.setSizeHint(QSize(0, 135))
+                icon_size = QSize(170, 225) if self.view_mode == "tiles" else QSize(85, 110)
+                item.setIcon(QPixmap(str(thumbnail)).scaled(icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            if self.view_mode == "tiles":
+                item.setTextAlignment(Qt.AlignHCenter | Qt.AlignTop)
+            else:
+                item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                # A zero-height hint makes valid database rows completely invisible.
+                item.setSizeHint(QSize(0, 135))
             self.books.addItem(item)
         no_results = not books
         self.books.setVisible(not no_results)
