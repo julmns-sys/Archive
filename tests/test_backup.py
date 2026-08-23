@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import zipfile
 
+import pymupdf as fitz
 import pytest
+from PIL import Image
 
 from app.services import BackupService
 
@@ -37,6 +40,14 @@ def test_backup_file_restores_complete_library(archive, sample_pdf, tmp_path):
     service = BackupService(paths, repository, library)
     backup_file = service.create_file(tmp_path / "library.bobbackup")
 
+    with zipfile.ZipFile(backup_file) as packed:
+        names = set(packed.namelist())
+        manifest = json.loads(packed.read("backup_manifest.json"))
+    assert manifest["format_version"] == 2
+    assert any(name.endswith("/book.pdf") for name in names)
+    assert any("/Sources/" in name for name in names)
+    assert not any(name.endswith("/original.pdf") for name in names)
+
     library.delete_books([original.id])
     repository.delete_category(category)
     repository.delete_tag(tag)
@@ -50,7 +61,40 @@ def test_backup_file_restores_complete_library(archive, sample_pdf, tmp_path):
     assert [item.name for item in restored.categories] == ["Characters"]
     assert [item.name for item in restored.tags] == ["Drawings"]
     assert library.absolute(restored.current_pdf_path).is_file()
+    assert library.absolute(restored.original_pdf_path).read_bytes() == sample_pdf.read_bytes()
     assert library.thumbnail(restored).is_file()
+
+
+def test_compact_backup_rebuilds_original_from_mixed_sources(archive, sample_pdf, tmp_path):
+    paths, repository, _pdf, library = archive
+    photo = tmp_path / "first page.png"
+    Image.new("RGB", (700, 1000), (30, 180, 80)).save(photo)
+    book = library.import_book("Mixed sources", None, None, [], "", [photo, sample_pdf])
+    service = BackupService(paths, repository, library)
+    backup_file = service.create_file(tmp_path / "mixed.bobbackup")
+    library.delete_books([book.id])
+
+    assert service.restore(backup_file) == 1
+
+    restored = repository.list_books()[0]
+    with fitz.open(library.absolute(restored.original_pdf_path)) as original:
+        assert original.page_count == 4
+        assert original[0].get_images()
+        assert "Page 1" in original[1].get_text()
+    sources = sorted((library.book_directory(restored) / "original" / "sources").iterdir())
+    assert [path.suffix for path in sources] == [".png", ".pdf"]
+
+
+def test_legacy_folder_backup_still_restores(archive, sample_pdf, tmp_path):
+    paths, repository, _pdf, library = archive
+    book = library.import_book("Legacy", None, None, [], "", sample_pdf)
+    service = BackupService(paths, repository, library)
+    backup_folder = service.create(tmp_path / "legacy")
+    library.delete_books([book.id])
+
+    assert service.restore(backup_folder) == 1
+    restored = repository.list_books()[0]
+    assert library.absolute(restored.original_pdf_path).read_bytes() == sample_pdf.read_bytes()
 
 
 def test_invalid_backup_does_not_change_library(archive, sample_pdf, tmp_path):

@@ -56,10 +56,12 @@ untouched imported original when its original page still exists.
 ## Backup
 
 Open **Backup**, press **Create Backup File**, and save the `.bobbackup` file on
-an external drive or in another safe location. Bob Archive first builds and
-verifies a temporary copy; only a complete backup is finalized. The file is a
-regular ZIP archive containing readable PDFs and JSON metadata as well as the
-SQLite catalog.
+an external drive or in another safe location. Bob Archive writes the file
+directly without staging a second copy of the library, and only a complete
+backup is finalized. The file is a regular ZIP archive containing every source
+file, each current readable PDF, JSON metadata, and the SQLite catalog. Derived
+original PDFs are rebuilt from the preserved sources during restore, reducing
+the backup size without discarding source material.
 
 To bring the library back, press **Restore Library from Backup**, choose the
 `.bobbackup` file, and confirm. The backup is fully checked before it replaces

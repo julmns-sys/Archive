@@ -106,29 +106,84 @@ class BackupService:
             raise
 
     def create_file(self, destination: Path, progress: Progress | None = None) -> Path:
-        """Create a portable, single-file backup.
+        """Create a compact portable backup without staging a second library.
 
         The .bobbackup extension is deliberately a regular ZIP archive so the
-        contents remain accessible even without Bob Archive.
+        contents remain accessible even without Bob Archive. Version 2 omits
+        the derived original.pdf files: they are rebuilt from the untouched
+        source files during restore. Current PDFs, source files, and readable
+        metadata are all preserved.
         """
         destination = destination.expanduser().resolve()
         if destination.suffix.lower() != ".bobbackup":
             destination = destination.with_name(destination.name + ".bobbackup")
         destination.parent.mkdir(parents=True, exist_ok=True)
         notify = progress or (lambda _value, _message: None)
-        workspace = Path(tempfile.mkdtemp(prefix=".bob-backup-file-", dir=destination.parent))
         temporary_file = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+        catalog_snapshot = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.sqlite3.tmp")
         try:
-            backup = self.create(
-                workspace,
-                lambda value, message: notify(min(88, int(value * 0.88)), message),
-            )
-            notify(90, "Packing backup file")
-            with zipfile.ZipFile(temporary_file, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                files = [path for path in backup.rglob("*") if path.is_file()]
-                for index, path in enumerate(files, 1):
-                    archive.write(path, path.relative_to(backup))
-                    notify(90 + int(8 * index / max(1, len(files))), "Packing backup file")
+            books = self.repository.list_books()
+            storage = self.repository.list_storage_places()
+            categories = self.repository.list_categories()
+            tags = self.repository.list_tags()
+            notify(2, "Copying catalog")
+            self._snapshot_database(catalog_snapshot)
+            manifest_books = []
+            with zipfile.ZipFile(temporary_file, "w", allowZip64=True) as archive:
+                self._write_archive_file(archive, catalog_snapshot, "catalog.sqlite3")
+                self._write_archive_json(
+                    archive,
+                    "StoragePlaces/storage_places.json",
+                    [{"type": item.type, "number": item.number, "display_name": item.display_name, "code": item.code, "physical_location": item.physical_location, "shelves": [shelf.name for shelf in item.shelves]} for item in storage],
+                )
+                self._write_archive_json(archive, "Categories/categories.json", [{"name": item.name} for item in categories])
+                self._write_archive_json(archive, "Tags/tags.json", [{"name": item.name} for item in tags])
+
+                for index, book in enumerate(books, 1):
+                    notify(4 + int(91 * index / max(1, len(books))), f"Packing books ({index}/{len(books)})")
+                    folder = book_directory_name(book.book_code, book.title)
+                    prefix = f"Books/{folder}"
+                    current = self.library.absolute(book.current_pdf_path)
+                    pdf_hash = self._write_archive_file(archive, current, f"{prefix}/book.pdf")
+                    source_directory = self.library.book_directory(book) / "original" / "sources"
+                    source_manifest = []
+                    if source_directory.is_dir():
+                        for path in sorted(source_directory.iterdir()):
+                            if not path.is_file():
+                                continue
+                            source_manifest.append({
+                                "filename": path.name,
+                                "sha256": self._write_archive_file(archive, path, f"{prefix}/Sources/{path.name}"),
+                            })
+                    if not source_manifest:
+                        raise IOError(f"Cannot create a compact backup because {book.book_code} has no preserved source files.")
+                    # Refresh the readable sidecar so older libraries gain all current fields.
+                    self.library.write_metadata(book.id)
+                    book_root = self.library.book_directory(book)
+                    self._write_archive_file(archive, book_root / "metadata.json", f"{prefix}/metadata.json")
+                    page_state = book_root / "page_state.json"
+                    if page_state.exists():
+                        self._write_archive_file(archive, page_state, f"{prefix}/page_state.json")
+                    manifest_books.append({
+                        "folder": folder,
+                        "book_code": book.book_code,
+                        "title": book.title,
+                        "pdf_sha256": pdf_hash,
+                        "source_files": source_manifest,
+                        "original_storage": "rebuild_from_sources",
+                    })
+
+                manifest = {
+                    "format": "Bob Archive Backup",
+                    "format_version": 2,
+                    "created_at": datetime.now().astimezone().isoformat(),
+                    "book_count": len(books),
+                    "storage_place_count": len(storage),
+                    "category_count": len(categories),
+                    "tag_count": len(tags),
+                    "books": manifest_books,
+                }
+                self._write_archive_json(archive, "backup_manifest.json", manifest)
             os.replace(temporary_file, destination)
             notify(100, "Backup completed successfully")
             return destination
@@ -137,7 +192,7 @@ class BackupService:
             temporary_file.unlink(missing_ok=True)
             raise
         finally:
-            shutil.rmtree(workspace, ignore_errors=True)
+            catalog_snapshot.unlink(missing_ok=True)
 
     def restore(self, source: Path, progress: Progress | None = None) -> int:
         """Replace the active library with a verified backup folder or file."""
@@ -147,16 +202,17 @@ class BackupService:
         try:
             notify(2, "Opening backup")
             backup_root = self._open_backup(source, workspace / "unpacked")
+            move_extracted_files = source.is_file()
             manifest = self._read_and_verify_manifest(backup_root)
             notify(12, "Checking backup")
-            self._verify(backup_root, int(manifest["book_count"]))
+            self._verify(backup_root, int(manifest["book_count"]), int(manifest["format_version"]))
 
             staged_root = workspace / "library"
             staged_database = staged_root / "database" / self.paths.database_file.name
             staged_books = staged_root / "books"
             staged_database.parent.mkdir(parents=True, exist_ok=True)
             staged_books.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(backup_root / "catalog.sqlite3", staged_database)
+            self._transfer_file(backup_root / "catalog.sqlite3", staged_database, move_extracted_files)
             staged_db = Database(staged_database)
             initialize_schema(staged_db)
             restored_repository = ArchiveRepository(staged_db)
@@ -177,15 +233,21 @@ class BackupService:
                     raise IOError(f"Invalid catalog paths for {book.book_code}.")
                 current_target.parent.mkdir(parents=True, exist_ok=True)
                 original_target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source_directory / "book.pdf", current_target)
-                shutil.copy2(source_directory / "original.pdf", original_target)
+                self._transfer_file(source_directory / "book.pdf", current_target, move_extracted_files)
                 sources = source_directory / "Sources"
                 if sources.is_dir():
-                    shutil.copytree(sources, original_target.parent / "sources")
+                    if move_extracted_files:
+                        os.replace(sources, original_target.parent / "sources")
+                    else:
+                        shutil.copytree(sources, original_target.parent / "sources")
+                if manifest["format_version"] == 1:
+                    self._transfer_file(source_directory / "original.pdf", original_target, move_extracted_files)
+                else:
+                    self._rebuild_original(original_target.parent / "sources", original_target)
                 book_root = current_target.parent.parent
                 for name in ("metadata.json", "page_state.json"):
                     if (source_directory / name).is_file():
-                        shutil.copy2(source_directory / name, book_root / name)
+                        self._transfer_file(source_directory / name, book_root / name, move_extracted_files)
                 self.library.pdf.generate_thumbnails(current_target, book_root / "thumbnails")
 
             self._validate_staged_library(staged_database, staged_root, len(books))
@@ -230,7 +292,7 @@ class BackupService:
                 manifest = json.load(stream)
         except (OSError, json.JSONDecodeError) as error:
             raise ValueError("The backup manifest is missing or damaged.") from error
-        if manifest.get("format") != "Bob Archive Backup" or manifest.get("format_version") != 1:
+        if manifest.get("format") != "Bob Archive Backup" or manifest.get("format_version") not in (1, 2):
             raise ValueError("This backup format is not supported.")
         if not isinstance(manifest.get("book_count"), int) or manifest["book_count"] < 0:
             raise ValueError("The backup manifest contains an invalid book count.")
@@ -328,6 +390,58 @@ class BackupService:
             destination.close()
             source.close()
 
+    def _rebuild_original(self, source_directory: Path, destination: Path) -> None:
+        sources = sorted(path for path in source_directory.iterdir() if path.is_file())
+        if not sources:
+            raise IOError("A compact backup is missing the source files needed to rebuild an original PDF.")
+        prepared_directory = Path(tempfile.mkdtemp(prefix=".rebuild-original-", dir=destination.parent))
+        prepared: list[Path] = []
+        try:
+            for index, source in enumerate(sources, 1):
+                if source.suffix.lower() == ".pdf":
+                    self.library.pdf.validate(source)
+                    prepared.append(source)
+                else:
+                    converted = prepared_directory / f"source_{index:04d}.pdf"
+                    self.library.pdf.image_to_pdf(source, converted)
+                    prepared.append(converted)
+            if len(prepared) == 1:
+                self.library.pdf.copy_pdf(prepared[0], destination)
+            else:
+                self.library.pdf.merge_pdfs(prepared, destination)
+        finally:
+            shutil.rmtree(prepared_directory, ignore_errors=True)
+
+    @staticmethod
+    def _transfer_file(source: Path, destination: Path, move: bool) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if move:
+            os.replace(source, destination)
+        else:
+            shutil.copy2(source, destination)
+
+    @staticmethod
+    def _write_archive_json(archive: zipfile.ZipFile, name: str, data: object) -> None:
+        payload = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+        archive.writestr(name, payload, compress_type=zipfile.ZIP_DEFLATED, compresslevel=6)
+
+    @staticmethod
+    def _write_archive_file(archive: zipfile.ZipFile, source: Path, name: str) -> str:
+        """Stream one file into a ZIP while calculating its checksum."""
+        info = zipfile.ZipInfo.from_file(source, arcname=name)
+        # Scanned PDFs and raster images are already compressed. Storing them
+        # avoids hours of ineffective recompression on large libraries.
+        if source.suffix.lower() in {".pdf", ".jpg", ".jpeg", ".png", ".tif", ".tiff"}:
+            info.compress_type = zipfile.ZIP_STORED
+        else:
+            info.compress_type = zipfile.ZIP_DEFLATED
+        digest = hashlib.sha256()
+        with source.open("rb") as incoming, archive.open(info, "w", force_zip64=True) as outgoing:
+            while chunk := incoming.read(1024 * 1024):
+                digest.update(chunk)
+                outgoing.write(chunk)
+        return digest.hexdigest()
+
     @staticmethod
     def _sha256(path: Path) -> str:
         digest = hashlib.sha256()
@@ -337,7 +451,7 @@ class BackupService:
         return digest.hexdigest()
 
     @staticmethod
-    def _verify(root: Path, expected_books: int) -> None:
+    def _verify(root: Path, expected_books: int, format_version: int = 1) -> None:
         required = [root / "catalog.sqlite3", root / "backup_manifest.json", root / "StoragePlaces" / "storage_places.json", root / "Categories" / "categories.json", root / "Tags" / "tags.json"]
         if any(not path.is_file() for path in required):
             raise IOError("Backup verification failed: a required catalog file is missing.")
@@ -349,13 +463,19 @@ class BackupService:
         if len(book_directories) != expected_books:
             raise IOError("Backup verification failed: not every book was copied.")
         for directory in book_directories:
-            if not all((directory / name).is_file() for name in ("book.pdf", "original.pdf", "metadata.json")):
+            required_book_files = ["book.pdf", "metadata.json"]
+            if format_version == 1:
+                required_book_files.append("original.pdf")
+            if not all((directory / name).is_file() for name in required_book_files):
                 raise IOError(f"Backup verification failed for {directory.name}.")
         for entry in manifest.get("books", []):
             directory = root / "Books" / entry["folder"]
             if BackupService._sha256(directory / "book.pdf") != entry["pdf_sha256"]:
                 raise IOError(f"Backup verification failed: PDF checksum mismatch for {entry['book_code']}.")
-            for source in entry.get("source_pdfs", []):
+            sources = entry.get("source_files", []) if format_version == 2 else entry.get("source_pdfs", [])
+            if format_version == 2 and not sources:
+                raise IOError(f"Backup verification failed: no source files for {entry['book_code']}.")
+            for source in sources:
                 source_path = directory / "Sources" / source["filename"]
                 if not source_path.is_file() or BackupService._sha256(source_path) != source["sha256"]:
-                    raise IOError(f"Backup verification failed: source PDF mismatch for {entry['book_code']}.")
+                    raise IOError(f"Backup verification failed: source file mismatch for {entry['book_code']}.")

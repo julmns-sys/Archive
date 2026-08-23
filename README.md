@@ -26,7 +26,8 @@ Each imported book keeps an untouched original PDF, an editable current PDF,
 cached page thumbnails, and `metadata.json`. SQLite stores the searchable
 catalog but contains no PDF data. Portable `.bobbackup` files export both the
 catalog and readable JSON metadata and can be selected in the app to restore the
-complete library.
+complete library. Compact backups preserve every source and current PDF while
+rebuilding derived original PDFs during restore, avoiding redundant storage.
 
 See [docs/USER_GUIDE.md](docs/USER_GUIDE.md) for the main workflows.
 See [docs/MACOS_AND_CICD.md](docs/MACOS_AND_CICD.md) for iMac installation,
