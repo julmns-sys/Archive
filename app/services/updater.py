@@ -6,6 +6,7 @@ import os
 import platform
 import re
 import shlex
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,8 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable
+
+import certifi
 
 
 GITHUB_REPOSITORY = "julmns-sys/Archive"
@@ -82,7 +85,7 @@ class UpdateService:
             f"{GITHUB_API}/releases/latest",
             headers={"Accept": "application/vnd.github+json", "User-Agent": "Bob-Archive-Updater"},
         )
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with self._open(request, timeout=20) as response:
             payload = json.load(response)
         release_version = str(payload.get("tag_name", ""))
         _version_tuple(release_version)
@@ -121,7 +124,7 @@ class UpdateService:
         received = 0
         progress(2, "Downloading update")
         try:
-            with urllib.request.urlopen(request, timeout=60) as response, temporary.open("wb") as output:
+            with self._open(request, timeout=60) as response, temporary.open("wb") as output:
                 while chunk := response.read(1024 * 1024):
                     output.write(chunk)
                     digest.update(chunk)
@@ -158,11 +161,17 @@ class UpdateService:
         request = urllib.request.Request(
             release.checksum_url, headers={"User-Agent": "Bob-Archive-Updater"}
         )
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with self._open(request, timeout=20) as response:
             value = response.read(4096).decode("ascii", errors="strict").strip().split()[0]
         if not re.fullmatch(r"[0-9a-fA-F]{64}", value):
             raise RuntimeError("The release checksum file is invalid.")
         return value
+
+    @staticmethod
+    def _open(request: urllib.request.Request, timeout: int):
+        """Use a CA bundle packaged with the app instead of relying on the host Python."""
+        context = ssl.create_default_context(cafile=certifi.where())
+        return urllib.request.urlopen(request, timeout=timeout, context=context)
 
     @staticmethod
     def _validate_download_url(url: str) -> None:

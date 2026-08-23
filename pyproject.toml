@@ -9,6 +9,7 @@ description = "A simple, local archive for scanned books"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "certifi>=2024.7.4",
   "PySide6>=6.7,<7",
   "PyMuPDF>=1.24,<2",
   "opencv-python-headless>=4.10,<5",
@@ -28,4 +29,3 @@ include = ["app*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-

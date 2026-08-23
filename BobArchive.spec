@@ -3,7 +3,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 from app import __version__
 
 hiddenimports = collect_submodules("cv2") + collect_submodules("pymupdf")
-datas = collect_data_files("pymupdf")
+datas = collect_data_files("pymupdf") + collect_data_files("certifi")
 
 analysis = Analysis(
     ["app/main.py"],
