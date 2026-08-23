@@ -24,6 +24,19 @@ build does not remove books or the catalog. Use Bob Archive's backup command
 before moving an existing library between computers, copy the resulting
 `.bobbackup` file to the USB drive, and restore it on the iMac.
 
+## Update from inside Bob Archive
+
+Open **Update** in the sidebar and press **Check for Updates**. If a newer
+GitHub Release exists, press **Download and Install Update**. Bob Archive
+downloads the correct Intel or Apple Silicon build, verifies its SHA-256
+checksum, closes, replaces the application, and opens the new version. If the
+replacement fails, the updater restores the previous application.
+
+This works in the packaged macOS `.app`. A copy launched directly from Python
+can check and download releases but does not replace the source directory.
+The application needs write access to its own `.app`; if it was installed by a
+different administrator, replace it manually in `/Applications` once.
+
 ## Build directly on the iMac
 
 Install Python 3.11 or newer, copy the source folder to the iMac, open Terminal
@@ -67,7 +80,8 @@ git push -u origin main
 After Actions succeeds, download a build from **GitHub > Actions > latest
 workflow run > Artifacts**.
 
-To publish a version in **GitHub > Releases**:
+To publish a version in **GitHub > Releases** (the tag becomes the version shown
+inside the application):
 
 ```bash
 git tag v0.1.0

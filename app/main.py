@@ -14,10 +14,11 @@ from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app.config import AppPaths
+from app import __version__
 from app.database import ArchiveRepository, Database
 from app.database.schema import initialize_schema
 from app.pdf import PdfService
-from app.services import BackupService, LibraryService
+from app.services import BackupService, LibraryService, UpdateService
 from app.ui.main_window import MainWindow
 from app.ui.style import APP_STYLE
 from app.utilities.logging_setup import configure_logging
@@ -38,7 +39,8 @@ def build_application() -> tuple[QApplication, MainWindow]:
     pdf = PdfService()
     library = LibraryService(paths, repository, pdf)
     backup = BackupService(paths, repository, library)
-    return application, MainWindow(repository, library, pdf, backup)
+    updater = UpdateService(paths.root / "updates", __version__)
+    return application, MainWindow(repository, library, pdf, backup, updater)
 
 
 def main() -> int:

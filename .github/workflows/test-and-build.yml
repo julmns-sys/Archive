@@ -46,6 +46,20 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
+      - name: Set application version from release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          version = os.environ["RELEASE_TAG"].removeprefix("v")
+          Path("app/__init__.py").write_text(
+              f'"""Bob Archive application package."""\n\n__version__ = "{version}"\n',
+              encoding="utf-8",
+          )
+          PY
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -57,11 +71,15 @@ jobs:
       - name: Verify application bundle
         run: test -x 'dist/Bob Archive.app/Contents/MacOS/Bob Archive'
       - name: Create portable ZIP
-        run: ditto -c -k --sequesterRsrc --keepParent 'dist/Bob Archive.app' '${{ matrix.archive }}'
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent 'dist/Bob Archive.app' '${{ matrix.archive }}'
+          shasum -a 256 '${{ matrix.archive }}' > '${{ matrix.archive }}.sha256'
       - uses: actions/upload-artifact@v7
         with:
           name: Bob-Archive-macOS-${{ matrix.name }}
-          path: ${{ matrix.archive }}
+          path: |
+            ${{ matrix.archive }}
+            ${{ matrix.archive }}.sha256
           if-no-files-found: error
 
   release:
@@ -80,4 +98,4 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release-assets/*.zip --generate-notes --verify-tag
+        run: gh release create "$GITHUB_REF_NAME" release-assets/* --generate-notes --verify-tag

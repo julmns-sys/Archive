@@ -1,5 +1,6 @@
 # Build on macOS with: pyinstaller BobArchive.spec
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from app import __version__
 
 hiddenimports = collect_submodules("cv2") + collect_submodules("pymupdf")
 datas = collect_data_files("pymupdf")
@@ -48,11 +49,10 @@ app = BUNDLE(
     name="Bob Archive.app",
     icon=None,
     bundle_identifier="org.bobarchive.desktop",
-    version="0.1.0",
+    version=__version__,
     info_plist={
         "CFBundleDisplayName": "Bob Archive",
         "NSHighResolutionCapable": True,
         "LSApplicationCategoryType": "public.app-category.lifestyle",
     },
 )
-

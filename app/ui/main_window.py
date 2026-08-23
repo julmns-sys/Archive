@@ -9,16 +9,17 @@ from PySide6.QtCore import QRectF, QSize, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QImage, QPageLayout, QPainter, QPixmap
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMainWindow, QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QScrollArea,
     QSpinBox, QSplitter, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from app.database import ArchiveRepository
+from app import __version__
 from app.models import Book, StoragePlace
 from app.pdf import PdfService
-from app.services import BackupService, LibraryService
+from app.services import BackupService, LibraryService, PreparedUpdate, ReleaseInfo, UpdateService
 
 from .dialogs import AddBookDialog, CategoryDialog, StorageDialog, error_message
 from .page_editor import PageOrganizer, pixmap_to_qimage
@@ -768,6 +769,79 @@ class BackupPage(QWidget):
         if selected: self.restore_requested.emit(Path(selected))
 
 
+class UpdatePage(QWidget):
+    check_requested = Signal()
+    install_requested = Signal(object)
+
+    def __init__(self, updater: UpdateService):
+        super().__init__()
+        self.release: ReleaseInfo | None = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(16)
+        title = QLabel("Updates")
+        title.setProperty("heading", True)
+        layout.addWidget(title)
+        current = QLabel(f"Installed version: {__version__}")
+        current.setProperty("subheading", True)
+        layout.addWidget(current)
+        explanation = QLabel(
+            "Check GitHub for a new Bob Archive release. The correct build for this Mac "
+            "will be downloaded, verified, installed, and the application will reopen.\n\n"
+            "Your books and catalog are stored separately and will not be replaced."
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+        self.status = QLabel("")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        self.notes = QPlainTextEdit()
+        self.notes.setReadOnly(True)
+        self.notes.setMaximumHeight(230)
+        self.notes.hide()
+        layout.addWidget(self.notes)
+        layout.addStretch()
+        self.button = QPushButton("Check for Updates")
+        self.button.setProperty("primary", True)
+        self.button.setMinimumHeight(60)
+        self.button.clicked.connect(self._clicked)
+        layout.addWidget(self.button)
+        if not updater.supported():
+            self.status.setText(
+                "Automatic updates are available in the packaged macOS application."
+            )
+            self.button.setEnabled(False)
+
+    def _clicked(self) -> None:
+        if self.release is None:
+            self.check_requested.emit()
+        else:
+            self.install_requested.emit(self.release)
+
+    def set_busy(self, message: str) -> None:
+        self.status.setText(message)
+        self.button.setEnabled(False)
+
+    def show_release(self, release: ReleaseInfo) -> None:
+        if release.is_newer:
+            self.release = release
+            self.status.setText(f"Version {release.version} is available.")
+            self.button.setText("Download and Install Update")
+            self.button.setEnabled(True)
+            if release.notes:
+                self.notes.setPlainText(release.notes)
+                self.notes.show()
+        else:
+            self.release = None
+            self.status.setText("You already have the latest version.")
+            self.button.setText("Check Again")
+            self.button.setEnabled(True)
+
+    def show_error(self) -> None:
+        self.button.setEnabled(True)
+        self.button.setText("Try Again")
+
+
 class StatisticsPage(QWidget):
     def __init__(self, repository: ArchiveRepository, library: LibraryService, pdf: PdfService):
         super().__init__()
@@ -904,9 +978,10 @@ class StatisticsPage(QWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, repository: ArchiveRepository, library: LibraryService, pdf: PdfService, backup: BackupService):
+    def __init__(self, repository: ArchiveRepository, library: LibraryService, pdf: PdfService, backup: BackupService, updater: UpdateService):
         super().__init__()
-        self.repository, self.library, self.pdf, self.backup = repository, library, pdf, backup
+        self.repository, self.library, self.pdf, self.backup, self.updater = repository, library, pdf, backup, updater
+        self._installing_update = False
         self.pool = QThreadPool.globalInstance()
         self._active_workers: set[Worker] = set()
         self.add_book_dialog: AddBookDialog | None = None
@@ -917,16 +992,16 @@ class MainWindow(QMainWindow):
         nav_title = QLabel("BOB ARCHIVE"); nav_title.setObjectName("brandTitle"); nav.addWidget(nav_title)
         nav_subtitle = QLabel("Your personal library"); nav_subtitle.setObjectName("brandSubtitle"); nav.addWidget(nav_subtitle); nav.addSpacing(22)
         self.nav_buttons = []
-        self.stack = QStackedWidget(); self.library_page = LibraryPage(repository, library); self.statistics_page = StatisticsPage(repository, library, pdf); self.storage_page = StoragePage(repository); self.categories_page = CategoriesPage(repository); self.backup_page = BackupPage(); self.book_view = BookView(repository, library, pdf)
-        for label, page in (("Library", self.library_page), ("Statistics", self.statistics_page), ("Storage Places", self.storage_page), ("Categories && Tags", self.categories_page), ("Backup", self.backup_page)):
+        self.stack = QStackedWidget(); self.library_page = LibraryPage(repository, library); self.statistics_page = StatisticsPage(repository, library, pdf); self.storage_page = StoragePage(repository); self.categories_page = CategoriesPage(repository); self.backup_page = BackupPage(); self.update_page = UpdatePage(updater); self.book_view = BookView(repository, library, pdf)
+        for label, page in (("Library", self.library_page), ("Statistics", self.statistics_page), ("Storage Places", self.storage_page), ("Categories && Tags", self.categories_page), ("Backup", self.backup_page), ("Update", self.update_page)):
             button = QPushButton(label); button.setProperty("nav", True); button.setCheckable(True); button.clicked.connect(lambda _checked=False, widget=page: self._show(widget)); nav.addWidget(button); self.nav_buttons.append(button); self.stack.addWidget(page)
         nav.addStretch(); layout.addWidget(sidebar); layout.addWidget(self.stack, 1); self.stack.addWidget(self.book_view)
-        self.library_page.add_book.connect(self._add_book); self.library_page.open_book.connect(self._open_book); self.book_view.back.connect(lambda: self._show(self.library_page)); self.book_view.changed.connect(self._reload_all); self.book_view.start_worker.connect(self._start_worker); self.storage_page.changed.connect(self._reload_all); self.categories_page.changed.connect(self._reload_all); self.backup_page.create_requested.connect(self._create_backup); self.backup_page.restore_requested.connect(self._confirm_restore)
+        self.library_page.add_book.connect(self._add_book); self.library_page.open_book.connect(self._open_book); self.book_view.back.connect(lambda: self._show(self.library_page)); self.book_view.changed.connect(self._reload_all); self.book_view.start_worker.connect(self._start_worker); self.storage_page.changed.connect(self._reload_all); self.categories_page.changed.connect(self._reload_all); self.backup_page.create_requested.connect(self._create_backup); self.backup_page.restore_requested.connect(self._confirm_restore); self.update_page.check_requested.connect(self._check_for_update); self.update_page.install_requested.connect(self._install_update)
         self._reload_all(); self._show(self.library_page)
 
     def _show(self, page: QWidget) -> None:
         self.stack.setCurrentWidget(page)
-        pages = (self.library_page, self.statistics_page, self.storage_page, self.categories_page, self.backup_page)
+        pages = (self.library_page, self.statistics_page, self.storage_page, self.categories_page, self.backup_page, self.update_page)
         for button, target in zip(self.nav_buttons, pages):
             button.setChecked(target is page)
         if page is self.library_page: self.library_page.reload()
@@ -1030,8 +1105,66 @@ class MainWindow(QMainWindow):
         self.backup_page.status.setText(f"Library restored successfully ({book_count} books).")
         QMessageBox.information(self, "Library restored", f"The backup was restored successfully.\n\nBooks in library: {book_count}")
 
+    def _check_for_update(self) -> None:
+        self.update_page.set_busy("Checking GitHub for updates…")
+        worker = Worker(self.updater.check)
+        worker.signals.progress.connect(
+            lambda _value, message: self.update_page.status.setText(f"{message}…")
+        )
+        worker.signals.succeeded.connect(self.update_page.show_release)
+        worker.signals.failed.connect(self._update_failed)
+        self._start_worker(worker)
+
+    def _install_update(self, release: ReleaseInfo) -> None:
+        self.update_page.set_busy("Downloading update…")
+        worker = Worker(lambda progress: self.updater.download_and_prepare(release, progress))
+        worker.signals.progress.connect(
+            lambda value, message: self.update_page.status.setText(f"{message} — {value}%")
+        )
+        worker.signals.succeeded.connect(self._update_prepared)
+        worker.signals.failed.connect(self._update_failed)
+        self._start_worker(worker)
+
+    def _update_failed(self, message: str, trace: str) -> None:
+        self.update_page.status.setText("The update was not installed.")
+        self.update_page.show_error()
+        error_message(self, "Update failed", message, trace)
+
+    def _update_prepared(self, update: PreparedUpdate) -> None:
+        if not update.installer:
+            self.update_page.status.setText(f"Update downloaded to:\n{update.archive}")
+            self.update_page.show_error()
+            QMessageBox.information(
+                self,
+                "Update downloaded",
+                f"This development copy cannot replace itself automatically.\n\n"
+                f"The update was downloaded to:\n{update.archive}",
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            "Install update now?",
+            f"Bob Archive {update.version} is ready. The application will close, install the "
+            "update, and reopen automatically.",
+            QMessageBox.Cancel | QMessageBox.Yes,
+            QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            self.update_page.status.setText("The update is downloaded and ready to install.")
+            self.update_page.button.setEnabled(True)
+            return
+        try:
+            self.updater.launch_installer(update)
+        except Exception as error:
+            LOGGER.exception("Could not launch update installer")
+            self._update_failed(str(error), "")
+            return
+        self._installing_update = True
+        self.update_page.status.setText("Installing update…")
+        QTimer.singleShot(200, QApplication.quit)
+
     def closeEvent(self, event: QCloseEvent) -> None:
-        if self._active_workers:
+        if self._active_workers and not self._installing_update:
             QMessageBox.information(self, "Please wait", "Bob Archive is still saving data. Please wait for the current operation to finish before closing the application.")
             event.ignore()
             return
